@@ -1,0 +1,392 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  onSnapshot, 
+  setDoc, 
+  updateDoc, 
+  increment 
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+
+// Firebase configuration
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'supervoter-final-v5';
+
+// Audio System
+const playSound = (frequency, type = 'sine', duration = 0.1, volume = 0.05) => {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(frequency * 0.5, audioCtx.currentTime + duration);
+    
+    gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    oscillator.start();
+    oscillator.stop(audioCtx.currentTime + duration);
+    
+    setTimeout(() => {
+      if (audioCtx.state !== 'closed') audioCtx.close();
+    }, duration * 1000 + 200);
+  } catch (e) { }
+};
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [pollData, setPollData] = useState({ optionA: 0, optionB: 0 });
+  const [loading, setLoading] = useState(true);
+  const [particles, setParticles] = useState([]);
+  const [combo, setCombo] = useState(0);
+  const [isRecovering, setIsRecovering] = useState(false);
+  const [lastClickTime, setLastClickTime] = useState(0);
+  
+  // Fake Error States
+  const [isCrashed, setIsCrashed] = useState(false);
+  const [reloadClicks, setReloadClicks] = useState(0);
+  
+  const comboTimeoutRef = useRef(null);
+  const prevComboRef = useRef(0);
+
+  const POLL_COLLECTION = 'polls';
+  const POLL_ID = 'super-war-v5';
+  const EMOJIS = ['🔥', '⚡', '🚀', '⭐', '💥', '✨', '👑', '💎', '🌈', '🧨', '👾', '🌀', '💀'];
+  const COLORS = ['#ef4444', '#3b82f6', '#fbbf24', '#22c55e', '#a855f7', '#ec4899'];
+
+  // Auth
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // Sync Data
+  useEffect(() => {
+    if (!user) return;
+    const pollRef = doc(db, 'artifacts', appId, 'public', 'data', POLL_COLLECTION, POLL_ID);
+    const unsubscribe = onSnapshot(pollRef, (snap) => {
+      if (snap.exists()) setPollData(snap.data());
+      else setDoc(pollRef, { optionA: 0, optionB: 0 });
+      setLoading(false);
+    }, (error) => {
+      console.error("Firestore error:", error);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [user, appId]);
+
+  // Particle Cleanup
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setParticles(prev => prev.filter(p => now - p.startTime < 1500));
+    }, 100);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Monitor Combo Reset and Recovery Logic
+  useEffect(() => {
+    if (combo >= 1000 && !isCrashed) {
+      setIsCrashed(true);
+      setCombo(0);
+      playSound(40, 'square', 0.6, 0.1);
+    }
+    
+    // Trigger "Calm/Recovery" when a high combo is lost
+    if (prevComboRef.current > 50 && combo === 0 && !isCrashed) {
+      setIsRecovering(true);
+      const timer = setTimeout(() => setIsRecovering(false), 3000);
+      return () => clearTimeout(timer);
+    }
+    prevComboRef.current = combo;
+  }, [combo, isCrashed]);
+
+  // Automated Reboot Transition
+  useEffect(() => {
+    if (reloadClicks >= 150 && isCrashed) {
+      const timer = setTimeout(() => {
+        setIsCrashed(false);
+        setReloadClicks(0);
+        setCombo(0);
+        setIsRecovering(true);
+        setTimeout(() => setIsRecovering(false), 3000);
+      }, 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [reloadClicks, isCrashed]);
+
+  const generateParticles = (x, y, count, scale = 1) => {
+    const now = Date.now();
+    const newParticles = Array.from({ length: count }).map((_, idx) => ({
+      id: `${now}-${idx}-${Math.random()}`,
+      startTime: now,
+      x: x,
+      y: y,
+      tx: (Math.random() - 0.5) * (600 * scale), 
+      ty: -Math.random() * (500 * scale) - 100,  
+      emoji: Math.random() > 0.6 ? EMOJIS[Math.floor(Math.random() * EMOJIS.length)] : null,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      size: 8 + Math.random() * 20,
+      rotation: Math.random() * 720
+    }));
+    setParticles(prev => [...prev, ...newParticles]);
+  };
+
+  const handleSpam = useCallback((option, isLeft) => {
+    if (!user || isCrashed) return;
+    const now = Date.now();
+    const newCombo = now - lastClickTime < 450 ? combo + 1 : 1;
+    setCombo(newCombo);
+    setLastClickTime(now);
+
+    playSound(140 + (Math.min(newCombo, 500) * 3), newCombo > 700 ? 'sawtooth' : 'sine', 0.15);
+
+    if (newCombo >= 20) {
+      let burstCount = 4;
+      if (newCombo >= 600) burstCount = 20;
+      generateParticles(isLeft ? 30 : 70, 45, burstCount, newCombo > 300 ? 1.5 : 1);
+    }
+
+    const pollRef = doc(db, 'artifacts', appId, 'public', 'data', POLL_COLLECTION, POLL_ID);
+    updateDoc(pollRef, { [option]: increment(1) }).catch(console.error);
+
+    if (comboTimeoutRef.current) clearTimeout(comboTimeoutRef.current);
+    comboTimeoutRef.current = setTimeout(() => setCombo(0), 1200);
+  }, [user, combo, lastClickTime, appId, isCrashed]);
+
+  const handleReloadClick = () => {
+    const newCount = reloadClicks + 1;
+    setReloadClicks(newCount);
+    playSound(200 + (Math.min(newCount, 150) * 4), 'sine', 0.1, 0.08);
+  };
+
+  const total = pollData.optionA + pollData.optionB;
+  const percA = total === 0 ? 50 : (pollData.optionA / total) * 100;
+  const percB = total === 0 ? 50 : (pollData.optionB / total) * 100;
+  const leastClicked = pollData.optionA <= pollData.optionB ? 'A' : 'B';
+
+  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center text-white font-mono italic tracking-widest animate-pulse">RECONSTRUCTING REALITY...</div>;
+
+  // --- CRASHED UI (Fake Error Page) ---
+  if (isCrashed) {
+    const showBar = reloadClicks >= 1; 
+    const hideErrorText = reloadClicks >= 20; 
+    const showTitleYellow = reloadClicks >= 50; 
+    const isDarkening = reloadClicks >= 100; 
+    const showBackToNormal = reloadClicks >= 150; 
+
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-6 transition-all duration-[2000ms] select-none
+        ${isDarkening ? 'bg-slate-950' : 'bg-white'}
+      `}>
+        <div className="fixed inset-0 pointer-events-none z-[100]">
+          {particles.map(p => (
+            <div key={p.id} className="absolute pop" style={{ left: `${p.x}%`, top: `${p.y}%`, '--tx': `${p.tx}px`, '--ty': `${p.ty}px`, '--rot': `${p.rotation}deg`, fontSize: `${p.size}px`, backgroundColor: p.emoji ? 'transparent' : p.color, width: p.emoji ? 'auto' : '6px', height: p.emoji ? 'auto' : '6px', borderRadius: '2px' }}>{p.emoji}</div>
+          ))}
+        </div>
+
+        <div className="w-full max-w-xl flex flex-col items-center min-h-[600px]">
+          <div className="h-32 flex flex-col items-center justify-center w-full">
+            {reloadClicks >= 40 && (
+              <h1 className={`text-4xl md:text-6xl font-black italic tracking-tighter transition-all duration-1000 animate-in fade-in
+                ${showTitleYellow ? 'text-yellow-400 drop-shadow-[0_0_20px_rgba(250,204,21,0.6)]' : 'text-slate-300'}
+              `}>
+                SUPERVOTER
+              </h1>
+            )}
+          </div>
+
+          <div className="h-[280px] flex flex-col items-center justify-center w-full relative">
+            {!hideErrorText && (
+              <div className={`flex flex-col items-center transition-all duration-[1500ms] ${reloadClicks >= 15 ? 'plummet' : ''}`}>
+                <svg className="text-slate-300 mb-6" width="72" height="92" viewBox="0 0 72 92" fill="none">
+                  <path d="M44 2H10C5.58172 2 2 5.58172 2 10V82C2 86.4183 5.58172 90 10 90H62C66.4183 90 70 86.4183 70 82V28L44 2Z" stroke="currentColor" strokeWidth="4" strokeLinejoin="round"/>
+                  <path d="M44 2V28H70" stroke="currentColor" strokeWidth="4" strokeLinejoin="round"/>
+                  <circle cx="26" cy="54" r="4" fill="currentColor"/><circle cx="46" cy="54" r="4" fill="currentColor"/>
+                  <rect x="26" y="72" width="20" height="4" rx="2" fill="currentColor"/>
+                </svg>
+                <h2 className="text-2xl font-semibold text-gray-800 mb-2">This page isn't working</h2>
+                <p className="text-gray-500 text-sm mb-4 text-center">If the problem continues, contact the site owner.</p>
+                <p className="text-gray-400 text-xs font-mono mb-8 uppercase tracking-widest">HTTP ERROR 400</p>
+              </div>
+            )}
+          </div>
+
+          <div className="h-20 flex flex-col items-center justify-start w-full">
+            {!showBackToNormal && (
+              <button onClick={handleReloadClick} className="bg-[#1a73e8] hover:bg-[#1557b0] active:scale-95 transition-all text-white px-10 py-3 rounded shadow-md">
+                Reload
+              </button>
+            )}
+            {showBackToNormal && (
+              <div className="text-slate-500 font-black italic tracking-widest animate-pulse mt-4">REBOOTING...</div>
+            )}
+          </div>
+
+          <div className="flex-1 flex flex-col items-center justify-end w-full pb-8">
+            {showBar && (
+              <div className={`w-full space-y-2 animate-in slide-in-from-bottom-10 transition-all duration-[1500ms] ${isDarkening ? 'opacity-100' : 'opacity-40'}`}>
+                <div className="flex justify-between text-[10px] font-black tracking-widest text-slate-500">
+                  <span>RESTORING BATTLE STATE</span>
+                  <span>{Math.round(percA)}% VS {Math.round(percB)}%</span>
+                </div>
+                <div className="h-4 w-full bg-slate-200 rounded-full overflow-hidden flex border border-slate-300/30">
+                  <div className="h-full bg-red-600 transition-all duration-700" style={{ width: `${percA}%` }} />
+                  <div className="h-full bg-blue-600 transition-all duration-700" style={{ width: `${percB}%` }} />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- NORMAL UI ---
+  return (
+    <div className={`min-h-screen transition-all duration-[1500ms] select-none overflow-hidden flex flex-col items-center justify-center p-4 
+      ${combo >= 900 ? 'bg-gradient-to-br from-red-900/20 via-slate-900 to-blue-900/20 animate-pulse' : ''}
+      ${(combo >= 500 && combo < 900) ? 'bg-white invert' : 'bg-slate-950'}
+    `}>
+      <style>{`
+        @keyframes shake-1 { 0%, 100% { transform: translate(0,0); } 25% { transform: translate(-2px, 1px); } 75% { transform: translate(2px, -1px); } }
+        @keyframes shake-2 { 0%, 100% { transform: translate(0,0); } 25% { transform: translate(-5px, 3px); } 75% { transform: translate(5px, -3px); } }
+        @keyframes shake-3 { 0%, 100% { transform: translate(0,0); } 10% { transform: translate(-10px, -10px); } 50% { transform: translate(10px, 10px); } 90% { transform: translate(-10px, 10px); } }
+        @keyframes glitch-text { 0%, 100% { transform: skew(0); filter: blur(0); } 20% { transform: skew(10deg); filter: blur(2px) hue-rotate(90deg); } 40% { transform: skew(-10deg); filter: blur(1px); } }
+        @keyframes plummet { 0% { transform: translate(0,0) rotate(0); opacity: 1; } 100% { transform: translate(40px, 1500px) rotate(180deg); opacity: 0; } }
+        @keyframes plummet-bar { 0% { transform: translate(0,0) rotate(0); opacity: 1; } 100% { transform: translate(-60px, 1500px) rotate(-30deg); opacity: 0; } }
+        @keyframes dangle { 0%, 100% { transform: rotate(0); transform-origin: top center; } 50% { transform: rotate(18deg); transform-origin: top center; } }
+        @keyframes spin-place { 0% { transform: rotate(0); } 100% { transform: rotate(360deg); } }
+        @keyframes float-recover { 0% { transform: translateY(-1000px) rotate(-45deg); opacity: 0; } 70% { transform: translateY(30px) rotate(10deg); opacity: 1; } 100% { transform: translateY(0) rotate(0); opacity: 1; } }
+        @keyframes pop { 0% { transform: translate(0,0) scale(0); opacity: 1; } 100% { transform: translate(var(--tx), var(--ty)) scale(1) rotate(var(--rot)); opacity: 0; } }
+        
+        .s-1 { animation: shake-1 0.1s infinite; }
+        .s-2 { animation: shake-2 0.08s infinite; }
+        .s-3 { animation: shake-3 0.05s infinite; }
+        .glitch { animation: glitch-text 0.1s infinite; }
+        .dan { animation: dangle 1.5s ease-in-out infinite; }
+        .fall { animation: plummet 1.2s forwards cubic-bezier(0.5, 0, 1, 1); }
+        .plummet { animation: plummet 1.2s forwards cubic-bezier(0.5, 0, 1, 1); }
+        .fall-bar { animation: plummet-bar 1.2s forwards cubic-bezier(0.5, 0, 1, 1); animation-delay: 0.45s; }
+        .spin { animation: spin-place 0.5s linear infinite; }
+        .rec { animation: float-recover 1.8s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        .pop { animation: pop 1s forwards ease-out; }
+      `}</style>
+
+      {/* Confetti */}
+      <div className="fixed inset-0 pointer-events-none z-[100]">
+        {particles.map(p => (
+          <div key={p.id} className="absolute pop flex items-center justify-center"
+            style={{ left: `${p.x}%`, top: `${p.y}%`, '--tx': `${p.tx}px`, '--ty': `${p.ty}px`, '--rot': `${p.rotation}deg`, fontSize: `${p.size}px`, backgroundColor: p.emoji ? 'transparent' : p.color, width: p.emoji ? 'auto' : '6px', height: p.emoji ? 'auto' : '6px', borderRadius: '2px' }}
+          >{p.emoji}</div>
+        ))}
+      </div>
+
+      <div className={`w-full max-w-xl relative z-10 transition-all duration-[1500ms] 
+        ${combo >= 500 ? 's-3' : combo >= 100 ? 's-2' : combo >= 50 ? 's-1' : ''}
+      `}>
+        <header className="text-center mb-6">
+          <h1 className={`text-4xl md:text-6xl font-black italic tracking-tighter transition-all duration-[1000ms] flex justify-center items-center gap-1
+            ${combo >= 10 ? 'text-yellow-400 drop-shadow-[0_0_20px_rgba(250,204,21,0.6)]' : 'text-slate-100'}
+          `}>
+            <span className={combo >= 400 ? 'fall' : (isRecovering ? 'rec' : '')}>SUPER</span>
+            <span className={combo >= 700 ? 'glitch' : ''}>VOTE</span>
+            <span className={combo >= 150 ? 'fall' : (isRecovering ? 'rec' : '')}>R</span>
+          </h1>
+          
+          <div className="h-12 flex items-center justify-center mt-2">
+            <div className={`transition-all duration-300 ${combo > 2 ? 'opacity-100 scale-100' : 'opacity-0 scale-50'}`}>
+              <span className={`bg-white text-black px-4 py-1 rounded-full font-black text-xl md:text-2xl italic shadow-[4px_4px_0px_#ef4444] animate-bounce`}>
+                {combo}x
+              </span>
+            </div>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-48 md:h-64">
+          <div className={`h-full transition-all duration-[1500ms] 
+            ${(leastClicked === 'A' && combo >= 300) ? 'fall' : (leastClicked === 'A' && combo >= 250) ? 'dan' : (isRecovering ? 'rec' : '')}
+          `}>
+            <button onPointerDown={(e) => { e.preventDefault(); handleSpam('optionA', true); }}
+              className={`w-full h-full relative overflow-hidden rounded-3xl border-4 transition-all active:scale-95 flex flex-col items-center justify-center p-4
+                ${combo >= 800 ? 'spin' : ''}
+                ${combo >= 200 ? 'border-red-400 bg-red-600 shadow-[0_0_30px_rgba(239,68,68,0.5)]' : 'border-red-900 bg-red-950'}
+              `}
+            >
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+              <span className="relative text-red-500 font-black text-sm italic uppercase tracking-widest">Red Squad</span>
+              <span className="relative text-white font-black text-4xl md:text-5xl tabular-nums">{pollData.optionA.toLocaleString()}</span>
+            </button>
+          </div>
+
+          <div className={`h-full transition-all duration-[1500ms] 
+            ${(leastClicked === 'B' && combo >= 300) ? 'fall' : (leastClicked === 'B' && combo >= 250) ? 'dan' : (isRecovering ? 'rec' : '')}
+          `}>
+            <button onPointerDown={(e) => { e.preventDefault(); handleSpam('optionB', false); }}
+              className={`w-full h-full relative overflow-hidden rounded-3xl border-4 transition-all active:scale-95 flex flex-col items-center justify-center p-4
+                ${combo >= 800 ? 'spin' : ''}
+                ${combo >= 200 ? 'border-blue-400 bg-blue-600 shadow-[0_0_30px_rgba(59,130,246,0.5)]' : 'border-blue-900 bg-blue-950'}
+              `}
+            >
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+              <span className="relative text-blue-500 font-black text-sm italic uppercase tracking-widest">Blue Squad</span>
+              <span className="relative text-white font-black text-4xl md:text-5xl tabular-nums">{pollData.optionB.toLocaleString()}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* The Bar - Knocked down by SUPER with delay */}
+        <div className={`mt-10 space-y-2 transition-all duration-[1500ms] 
+          ${combo >= 400 ? 'fall-bar' : (isRecovering ? 'rec' : 'opacity-100')}
+        `}>
+          <div className="flex justify-between text-[10px] font-black tracking-[0.3em] text-slate-500 italic">
+            <span>{Math.round(percA)}% RED</span>
+            <span>{Math.round(percB)}% BLUE</span>
+          </div>
+          <div className={`h-8 md:h-12 w-full bg-black rounded-full overflow-hidden flex border-4 border-slate-900 shadow-lg`}>
+            <div className="h-full bg-red-600 transition-all duration-700 relative border-r-2 border-white/20" style={{ width: `${percA}%` }} />
+            <div className="h-full bg-blue-600 transition-all duration-700 relative" style={{ width: `${percB}%` }} />
+          </div>
+        </div>
+
+        <footer className="mt-8 text-center opacity-5 hover:opacity-100 transition-opacity duration-[1000ms]">
+          <button onClick={() => setDoc(doc(db, 'artifacts', appId, 'public', 'data', POLL_COLLECTION, POLL_ID), { optionA: 0, optionB: 0 })}
+            className="text-[8px] text-slate-600 uppercase font-black tracking-widest">
+            Reset War Data
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+export default App;
